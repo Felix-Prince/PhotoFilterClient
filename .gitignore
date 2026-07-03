@@ -1,0 +1,44 @@
+# === 依赖 ===
+node_modules/
+
+# === Rust 编译产物 ===
+target/
+**/target/
+
+# === Tauri 自动生成 schema ===
+**/src-tauri/gen/schemas/
+
+# === Vite / 前端构建产物 ===
+dist/
+**/dist/
+
+# === Python 缓存 ===
+__pycache__/
+*.pyc
+*.pyo
+
+# === Spike 测试输出（含个人照片文件名，不入库）===
+spike-data/
+
+# === IDE / 编辑器 ===
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === 系统文件 ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === 日志 / 临时 / 备份 ===
+*.log
+*.tmp
+*.bak
+
+# === Tauri 打包产物 ===
+*.msi
+*.dmg
+*.AppImage
+*.deb
+*.exe.bak
