@@ -507,6 +507,50 @@ fn open_photo(photo_path: String) -> Result<(), String> {
     open::that(&path).map_err(|e| format!("打开系统查看器失败: {}", e))
 }
 
+/// 将待定照片移回容器根目录（恢复待处理状态）
+/// 接收前端传递的待定照片路径列表，避免路径构造不一致
+#[tauri::command]
+fn recall_unsure(photo_paths: Vec<String>, kind: String) -> Result<Vec<String>, String> {
+    let _ = kind; // 保留参数，暂未使用（路径由前端直接传入）
+    let mut moved: Vec<String> = Vec::new();
+
+    for path_str in &photo_paths {
+        let path = PathBuf::from(path_str);
+        if !path.exists() { continue; }
+
+        // 获取路径中的父目录（预期是 "待定"）和上级目录（预期是容器 "图片"）
+        let parent = match path.parent() {
+            Some(p) => p.to_path_buf(),
+            None => continue,
+        };
+        let grandparent = match parent.parent() {
+            Some(g) => g.to_path_buf(),
+            None => continue,
+        };
+
+        // 确认父目录确实是 "待定"
+        let dir_name = parent.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if dir_name != "待定" { continue; }
+
+        // 目标位置：上级目录/文件名
+        let fname = match path.file_name() {
+            Some(f) => f,
+            None => continue,
+        };
+        let dest = grandparent.join(fname);
+        if dest.exists() { continue; }
+
+        match fs::rename(&path, &dest) {
+            Ok(()) => {
+                moved.push(fname.to_string_lossy().to_string());
+            }
+            Err(_) => { /* 单个失败不阻断 */ }
+        }
+    }
+
+    Ok(moved)
+}
+
 /// 后台批量预生成所有缩略图（不阻塞 IPC 线程）
 #[tauri::command]
 fn prefetch_thumbnails(photos: Vec<PhotoInfo>) -> Result<(), String> {
@@ -675,7 +719,8 @@ pub fn run() {
             prepare_workspace,
             move_photo,
             undo_move,
-            open_photo
+            open_photo,
+            recall_unsure
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

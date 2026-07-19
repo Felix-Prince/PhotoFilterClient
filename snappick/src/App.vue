@@ -140,6 +140,7 @@
           <span class="zone-dot unsure-dot"></span>
           <span class="zone-title">待定</span>
           <span class="zone-count">{{ countByStatus.unsure }}</span>
+          <button v-if="countByStatus.unsure > 0" @click="recallUnsure" class="recall-btn" title="全部移回待处理区重新筛选">↶ 全部召回待处理</button>
         </div>
         <div class="classified-scroll">
           <div class="grid classified-grid">
@@ -225,6 +226,20 @@ const thumbDone = ref(0);
 const thumbTotal = ref(0);
 let pollTimer = null;
 
+// 消息自动消失（3s）
+let errorTimer = null;
+let messageTimer = null;
+function showError(msg) {
+  if (errorTimer) clearTimeout(errorTimer);
+  error.value = msg;
+  errorTimer = setTimeout(() => { error.value = ""; }, 3000);
+}
+function showMessage(msg) {
+  if (messageTimer) clearTimeout(messageTimer);
+  message.value = msg;
+  messageTimer = setTimeout(() => { message.value = ""; }, 3000);
+}
+
 let t0 = 0;
 let loaded = new Set();
 let observer = null;
@@ -276,11 +291,11 @@ async function confirmKind(k) {
   if (k === "video") {
     ffmpegAvailable.value = await invoke("detect_ffmpeg");
     if (!ffmpegAvailable.value) {
-      message.value = "⚠ 未检测到 ffmpeg，视频将仅显示文件名（无法抽帧缩略图）。双击可用系统播放器预览。";
+      showMessage("⚠ 未检测到 ffmpeg，视频将仅显示文件名（无法抽帧缩略图）。双击可用系统播放器预览。");
     }
   } else {
     ffmpegAvailable.value = true;
-    message.value = "";
+message.value = "";
   }
 
   await startScan();
@@ -331,7 +346,7 @@ async function startScan() {
     await nextTick();
     startObserver();
   } catch (e) {
-    error.value = String(e);
+    showError(String(e));
     loading.value = false;
   }
 }
@@ -343,7 +358,7 @@ async function prepare() {
     const cname = kind.value === "video" ? "视频" : "图片";
     message.value = `工作区已准备：${cname}/保留 · ${cname}/删除 · ${cname}/待定`;
   } catch (e) {
-    error.value = String(e);
+    showError(String(e));
   }
 }
 
@@ -371,7 +386,7 @@ async function classifySelected(target) {
     if (undoStack.value.length > UNDO_MAX) undoStack.value.shift();
     if (pendingCount.value > 0) moveToNextPending();
   } catch (e) {
-    error.value = String(e);
+    showError(String(e));
   }
 }
 
@@ -392,7 +407,7 @@ async function undo() {
       }
     }
   } catch (e) {
-    error.value = String(e);
+    showError(String(e));
     // 撤销失败，把记录放回去
     undoStack.value.push(record);
   }
@@ -405,7 +420,7 @@ async function openPreviewIdx(idx) {
   try {
     await invoke("open_photo", { photoPath: photo.path });
   } catch (e) {
-    error.value = String(e);
+    showError(String(e));
   }
 }
 
@@ -417,10 +432,44 @@ async function openSystemViewer() {
   const photo = selectedPhoto.value;
   if (!photo) return;
   try { await invoke("open_photo", { photoPath: photo.path }); }
-  catch (e) { error.value = String(e); }
+  catch (e) { showError(String(e)); }
 }
 
-// 缩略图预生成进度轮询
+// 待定区全部召回待处理
+async function recallUnsure() {
+  if (!folder.value || kind.value === "") return;
+  const container = kind.value === "video" ? "视频" : "图片";
+  try {
+    const unsurePaths = photos.value
+      .filter(p => p.status === "unsure")
+      .map(p => p.path);
+    if (unsurePaths.length === 0) {
+      showMessage("没有待定照片需召回");
+      return;
+    }
+    showMessage("召回中...");
+    const moved = await invoke("recall_unsure", { photoPaths: unsurePaths, kind: kind.value });
+    if (!moved || moved.length === 0) {
+      showMessage("文件可能已在目标位置，无需移动");
+      return;
+    }
+    const oldSeg = `\\${container}\\待定\\`;
+    const newSeg = `\\${container}\\`;
+    for (const p of photos.value) {
+      if (p.status === "unsure" && moved.includes(p.name)) {
+        p.status = "pending";
+        if (p.path.includes(oldSeg)) {
+          p.path = p.path.replace(oldSeg, newSeg);
+        }
+      }
+    }
+    const first = photos.value.findIndex(p => p.status === "pending");
+    if (first >= 0) selectedIndex.value = first;
+    message.value = `已将 ${moved.length} 张照片召回待处理`;
+  } catch (e) {
+    showError(String(e));
+  }
+}
 function startThumbPolling() {
   stopThumbPolling();
   pollTimer = setInterval(async () => {
@@ -681,5 +730,9 @@ button.active { background:#00d4aa; color:#1a1a2e; }
 /* 预览按钮 */
 .preview-btn { border-color:#00d4aa; color:#00d4aa; }
 .preview-btn:hover { background:#00d4aa22; }
+
+/* 召回按钮 */
+.recall-btn { border-color:#f0b429; color:#f0b429; font-size:11px; padding:3px 10px; }
+.recall-btn:hover { background:#f0b42922; }
 </style>
 
