@@ -19,6 +19,10 @@
       <div class="stat unsure-stat"><span class="label">待定</span><span class="value">{{ countByStatus.unsure }}</span></div>
       <div class="stat drop-stat"><span class="label">删除</span><span class="value">{{ countByStatus.drop }}</span></div>
       <div class="stat"><span class="label">进度</span><span class="value">{{ progressPct }}%</span></div>
+      <div class="stat" v-if="thumbTotal > 0 && thumbDone < thumbTotal">
+        <span class="label">缩略图</span>
+        <span class="value">{{ thumbDone }}/{{ thumbTotal }}</span>
+      </div>
       <div class="stat"><span class="label">扫描</span><span class="value">{{ scanMs ?? '—' }}ms</span></div>
     </div>
 
@@ -33,7 +37,7 @@
         <button @click="classifySelected('keep')" :class="{ active: selectedPhoto.status === 'keep' }">P 保留</button>
         <button @click="classifySelected('drop')" :class="{ active: selectedPhoto.status === 'drop' }">X 删除</button>
         <button @click="classifySelected('unsure')" :class="{ active: selectedPhoto.status === 'unsure' }">U 待定</button>
-        <button @click="openPreview" class="preview-btn" title="用系统查看器打开大图 (Enter)">🔍 预览</button>
+        <button @click="openSystemViewer" class="preview-btn" title="用系统查看器打开大图 (Enter)">🔍 预览</button>
         <button
           v-if="undoStack.length > 0"
           @click="undo"
@@ -41,7 +45,7 @@
           title="撤销上一步 (Ctrl+Z)"
         >↶ 撤销 ({{ undoStack.length }})</button>
       </div>
-      <span class="hint">←/→ 选择 · P/X/U 分类 · Enter 预览 · 双击卡片亦可 · Ctrl+Z 撤销</span>
+      <span class="hint">←/→ 选择 · P/X/U 分类 · Enter 系统预览 · 双击卡片 · Ctrl+Z 撤销</span>
     </div>
 
     <div v-if="loading" class="loading">{{ loadingMsg }}</div>
@@ -216,12 +220,17 @@ const kind = ref("photo");
 const showKindPicker = ref(false);
 const ffmpegAvailable = ref(false);
 
+// 缩略图预生成进度
+const thumbDone = ref(0);
+const thumbTotal = ref(0);
+let pollTimer = null;
+
 let t0 = 0;
 let loaded = new Set();
 let observer = null;
 const pendingThumbQueue = new Set();
 let activeThumbLoads = 0;
-const MAX_CONCURRENT = 3;
+const MAX_CONCURRENT = 12;
 
 // 撤销栈：每项是后端返回的 MoveRecord
 const undoStack = ref([]);
@@ -304,6 +313,7 @@ async function startScan() {
     photos.value = r.photos.map(p => ({
       ...p,
       dataUrl: null,
+      previewUrl: null,
       loading: false,
       status: p.status || "pending",
     }));
@@ -311,6 +321,13 @@ async function startScan() {
     selectedIndex.value = firstPending >= 0 ? firstPending : 0;
     undoStack.value = [];
     loading.value = false;
+
+    // 后台预生成缩略图
+    thumbDone.value = 0;
+    thumbTotal.value = r.photos.length;
+    invoke("prefetch_thumbnails", { photos: r.photos });
+    startThumbPolling();
+
     await nextTick();
     startObserver();
   } catch (e) {
@@ -394,6 +411,29 @@ async function openPreviewIdx(idx) {
 
 async function openPreview() {
   if (selectedPhoto.value) await openPreviewIdx(selectedIndex.value);
+}
+
+async function openSystemViewer() {
+  const photo = selectedPhoto.value;
+  if (!photo) return;
+  try { await invoke("open_photo", { photoPath: photo.path }); }
+  catch (e) { error.value = String(e); }
+}
+
+// 缩略图预生成进度轮询
+function startThumbPolling() {
+  stopThumbPolling();
+  pollTimer = setInterval(async () => {
+    try {
+      const p = await invoke("get_thumb_progress");
+      thumbDone.value = p.done;
+      thumbTotal.value = p.total;
+      if (p.done >= p.total) stopThumbPolling();
+    } catch (_) {}
+  }, 1000);
+}
+function stopThumbPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
 }
 
 function moveToNextPending() {
@@ -511,6 +551,7 @@ function fileSizeText(bytes) {
 
 function clearResults() {
   if (observer) observer.disconnect();
+  stopThumbPolling();
   photos.value = [];
   selectedIndex.value = 0;
   loadedCount.value = 0;
@@ -518,6 +559,8 @@ function clearResults() {
   pendingThumbQueue.clear();
   activeThumbLoads = 0;
   undoStack.value = [];
+  thumbDone.value = 0;
+  thumbTotal.value = 0;
   folder.value = "";
   kind.value = "photo";
   ffmpegAvailable.value = false;
@@ -634,5 +677,9 @@ button.active { background:#00d4aa; color:#1a1a2e; }
 .kind-label { color:#e0e0e0; font-weight:600; }
 .kind-sub { color:#666; font-size:11px; }
 .modal-cancel { width:100%; padding:8px; border-color:#555; color:#888; }
+
+/* 预览按钮 */
+.preview-btn { border-color:#00d4aa; color:#00d4aa; }
+.preview-btn:hover { background:#00d4aa22; }
 </style>
 

@@ -1,7 +1,18 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
+
+// 缩略图预生成进度
+static THUMB_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static THUMB_DONE: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Debug, Serialize)]
+pub struct ThumbProgress {
+    pub done: usize,
+    pub total: usize,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PhotoInfo {
@@ -496,6 +507,103 @@ fn open_photo(photo_path: String) -> Result<(), String> {
     open::that(&path).map_err(|e| format!("打开系统查看器失败: {}", e))
 }
 
+/// 后台批量预生成所有缩略图（不阻塞 IPC 线程）
+#[tauri::command]
+fn prefetch_thumbnails(photos: Vec<PhotoInfo>) -> Result<(), String> {
+    THUMB_TOTAL.store(photos.len(), Ordering::SeqCst);
+    THUMB_DONE.store(0, Ordering::SeqCst);
+
+    let photos: Vec<String> = photos.into_iter().map(|p| p.path).collect();
+
+    std::thread::spawn(move || {
+        use rayon::prelude::*;
+        photos.par_iter().for_each(|path| {
+            let _ = generate_thumbnail_sync(path);
+            THUMB_DONE.fetch_add(1, Ordering::SeqCst);
+        });
+    });
+
+    Ok(())
+}
+
+/// 查询缩略图预生成进度
+#[tauri::command]
+fn get_thumb_progress() -> ThumbProgress {
+    ThumbProgress {
+        done: THUMB_DONE.load(Ordering::SeqCst),
+        total: THUMB_TOTAL.load(Ordering::SeqCst),
+    }
+}
+
+/// 获取大图预览（最长边 1920px JPEG base64）
+#[tauri::command]
+async fn get_preview(photo_path: String) -> Result<ThumbResult, String> {
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        generate_preview_sync(&photo_path)
+    })
+    .await
+    .map_err(|e| format!("任务执行失败: {}", e))?;
+
+    result
+}
+
+/// 预览缓存路径
+fn preview_cache_path(photo_path: &str) -> PathBuf {
+    let mut hash: u64 = 5381;
+    for b in photo_path.bytes() {
+        hash = hash.wrapping_mul(33).wrapping_add(b as u64);
+    }
+    let dir = dirs::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("snappick-spike3")
+        .join("previews");
+    let _ = fs::create_dir_all(&dir);
+    dir.join(format!("{}.jpg", hash))
+}
+
+/// 生成预览图：最长边 1920px
+fn generate_preview_sync(photo_path: &str) -> Result<ThumbResult, String> {
+    use image::imageops::FilterType;
+    let start = Instant::now();
+    let cache_path = preview_cache_path(photo_path);
+
+    if cache_path.exists() {
+        let data = fs::read(&cache_path).map_err(|e| format!("读预览缓存失败: {}", e))?;
+        let b64 = base64_encode(&data);
+        return Ok(ThumbResult {
+            data_url: Some(format!("data:image/jpeg;base64,{}", b64)),
+            gen_ms: 0,
+        });
+    }
+
+    let src_path = PathBuf::from(photo_path);
+    let img = image::open(&src_path).map_err(|e| format!("打开图片失败: {}", e))?;
+
+    let preview = if img.width() > 1920 || img.height() > 1920 {
+        if img.width() > img.height() {
+            img.resize(1920, 0, FilterType::Lanczos3)
+        } else {
+            img.resize(0, 1920, FilterType::Lanczos3)
+        }
+    } else {
+        img
+    };
+
+    let mut buf = Vec::new();
+    use image::ImageEncoder;
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 85)
+        .write_image(preview.as_bytes(), preview.width(), preview.height(), preview.color().into())
+        .map_err(|e| format!("编码 JPEG 失败: {}", e))?;
+
+    let _ = fs::write(&cache_path, &buf);
+
+    let b64 = base64_encode(&buf);
+    Ok(ThumbResult {
+        data_url: Some(format!("data:image/jpeg;base64,{}", b64)),
+        gen_ms: start.elapsed().as_millis() as u64,
+    })
+}
+
 fn collect_pair_files(source: &PathBuf) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let Some(parent) = source.parent() else { return files; };
@@ -560,7 +668,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             scan_photos,
             get_thumbnail,
+            get_preview,
             detect_ffmpeg,
+            prefetch_thumbnails,
+            get_thumb_progress,
             prepare_workspace,
             move_photo,
             undo_move,

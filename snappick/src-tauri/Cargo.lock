@@ -3728,6 +3728,7 @@ dependencies = [
  "log",
  "once_cell",
  "open",
+ "rayon",
  "serde",
  "serde_json",
  "tauri",
